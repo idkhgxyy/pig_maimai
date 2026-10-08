@@ -208,3 +208,129 @@ def render_png(player: dict, bests: dict, out_path: Path) -> None:
 
 async def render_b50_png_async(player: dict, bests: dict, out_path: Path) -> None:
     await asyncio.to_thread(render_png, player, bests, out_path)
+
+
+# ==================== 歌曲详情卡 ====================
+
+SONG_TEMPLATE = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 560px; padding: 24px;
+  background: linear-gradient(160deg, #141428 0%, #1c2340 55%, #232a52 100%);
+  color: #e8e8f0;
+  font-family: 'Noto Sans CJK SC', 'Noto Sans SC', sans-serif;
+}
+.top { display: flex; gap: 18px; margin-bottom: 18px; }
+.jacket {
+  width: 170px; height: 170px; border-radius: 12px; object-fit: cover;
+  background: #2c3562; flex-shrink: 0;
+}
+.idline {
+  font-size: 11px; color: #8fa3ff; letter-spacing: 2px; margin-bottom: 4px;
+}
+.title {
+  font-size: 19px; font-weight: 800; line-height: 1.3; margin-bottom: 10px;
+  word-break: break-all;
+}
+.frow { font-size: 12px; margin-bottom: 6px; color: #b6bade; }
+.frow .k { color: #8fa3ff; font-weight: 700; margin-right: 6px; }
+.frow .v { color: #e8e8f0; }
+.charts { width: 100%; border-collapse: collapse; }
+.charts td {
+  padding: 7px 8px; font-size: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.charts tr:first-child td { color: #8fa3ff; font-size: 10.5px; background: none; }
+.badge {
+  font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; color: #fff;
+  white-space: nowrap;
+}
+.cnst { color: #ffd166; font-weight: 700; font-variant-numeric: tabular-nums; }
+.notes { color: #9aa0c3; font-variant-numeric: tabular-nums; }
+.footer { margin-top: 14px; text-align: center; font-size: 10px; color: #6b7299; }
+</style></head><body>
+  <div class="top">
+    <img class="jacket" src="__JACKET__">
+    <div>
+      <div class="idline">__ID__</div>
+      <div class="title">__TITLE__</div>
+      <div class="frow"><span class="k">曲师</span><span class="v">__ARTIST__</span></div>
+      <div class="frow"><span class="k">分类</span><span class="v">__GENRE__</span></div>
+      <div class="frow"><span class="k">版本</span><span class="v">__VERSION__</span></div>
+      <div class="frow"><span class="k">BPM</span><span class="v">__BPM__</span></div>
+    </div>
+  </div>
+  <table class="charts">
+    <tr><td>难度</td><td>定数</td><td>谱师</td><td>物量</td></tr>
+    __CHART_ROWS__
+  </table>
+  <div class="footer">猪bot · pig_maimai · 数据来自落雪咖啡屋</div>
+</body></html>
+"""
+
+
+def _fmt_level(level_value) -> str:
+    """7.5 → 7+（定数换算显示难度），14.0 → 14"""
+    lv = float(level_value)
+    return f"{int(lv)}+" if lv % 1 else str(int(lv))
+
+
+def _chart_row(chart: dict) -> str:
+    idx = chart.get("difficulty", 3)
+    color = DIFF_COLORS[idx] if 0 <= idx < len(DIFF_COLORS) else "#888"
+    name = DIFF_NAMES[idx] if 0 <= idx < len(DIFF_NAMES) else "?"
+    badge = f'<span class="badge" style="background:{color}">{name} {_fmt_level(chart.get("level_value", 0))}</span>'
+    cnst = f'<span class="cnst">{chart.get("level_value", "?")}</span>'
+    designer = escape(str(chart.get("note_designer") or "-"))
+    notes = chart.get("notes") or {}
+    total = notes.get("total", "?") if notes else "?"
+    return (
+        f"<tr><td>{badge}</td><td>{cnst}</td>"
+        f"<td>{designer}</td><td class='notes'>{total}</td></tr>"
+    )
+
+
+def build_song_html(song: dict, version_names: dict, genre_names: dict) -> str:
+    html = SONG_TEMPLATE
+    html = html.replace("__JACKET__", JACKET_URL.format(id=song.get("id")))
+    html = html.replace("__ID__", f"No.{song.get('id', '???')}")
+    html = html.replace("__TITLE__", escape(str(song.get("title", "???"))))
+    html = html.replace("__ARTIST__", escape(str(song.get("artist", "???"))))
+    genre = genre_names.get(song.get("genre"), song.get("genre", "???"))
+    html = html.replace("__GENRE__", escape(str(genre)))
+    version = version_names.get(song.get("version"), song.get("version", "???"))
+    html = html.replace("__VERSION__", escape(str(version)))
+    html = html.replace("__BPM__", str(song.get("bpm", "???")))
+
+    diffs = song.get("difficulties", {})
+    charts = (diffs.get("standard") or []) + (diffs.get("dx") or [])
+    html = html.replace("__CHART_ROWS__", "".join(_chart_row(c) for c in charts))
+    return html
+
+
+def render_song_png(song: dict, version_names: dict, genre_names: dict, out_path: Path) -> None:
+    """同步渲染歌曲详情卡（调用方用 asyncio.to_thread 包一层）。"""
+    from playwright.sync_api import sync_playwright
+
+    html_path = PLUGIN_DIR / "song_last.html"
+    html_path.write_text(
+        build_song_html(song, version_names, genre_names), encoding="utf-8"
+    )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox", "--disable-gpu"])
+        page = browser.new_page(
+            viewport={"width": 560, "height": 700}, device_scale_factor=2
+        )
+        page.goto(html_path.as_uri())
+        page.wait_for_timeout(1200)  # 等曲绘加载
+        page.screenshot(path=str(out_path), full_page=True)
+        browser.close()
+
+
+async def render_song_png_async(
+    song: dict, version_names: dict, genre_names: dict, out_path: Path
+) -> None:
+    await asyncio.to_thread(render_song_png, song, version_names, genre_names, out_path)

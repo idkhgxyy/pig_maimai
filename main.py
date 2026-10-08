@@ -186,6 +186,12 @@ class PigMaimaiPlugin(Star):
             )
             return
 
+        # 唯一命中 → 直接出详情卡
+        if len(hits) == 1:
+            async for r in self._song_card(event, hits[0], song_data):
+                yield r
+            return
+
         lines = []
         for s in hits:
             diffs = s.get("difficulties", {})
@@ -200,4 +206,55 @@ class PigMaimaiPlugin(Star):
                 f"  [{s.get('id')}] {s.get('title')} - {s.get('artist', '?')} "
                 f"({'/'.join(lv)}){via}"
             )
-        yield event.plain_result("🎼 查到这些：\n" + "\n".join(lines))
+        yield event.plain_result(
+            "🎼 查到这些（/歌曲 <编号> 看详情）：\n" + "\n".join(lines)
+        )
+
+    async def _song_card(self, event: AstrMessageEvent, song: dict, song_data: dict):
+        """渲染并发送歌曲详情卡。"""
+        version_names = {
+            v.get("version"): v.get("title") for v in song_data.get("versions", [])
+        }
+        genre_names = {
+            g.get("genre"): g.get("title") for g in song_data.get("genres", [])
+        }
+        out_dir = Path(PLUGIN_DIR) / "render_cache"
+        out_dir.mkdir(exist_ok=True)
+        out = out_dir / f"song_{song.get('id')}.png"
+        try:
+            import render as b50render  # noqa: PLC0415
+
+            await b50render.render_song_png_async(
+                song, version_names, genre_names, out
+            )
+            yield event.image_result(str(out))
+        except Exception as e:  # 渲染兜底：回退文字版
+            diffs = song.get("difficulties", {})
+            lv = "/".join(
+                f"{c.get('level')}" for k in ("standard", "dx") for c in (diffs.get(k) or [])
+            )
+            yield event.plain_result(
+                f"[{song.get('id')}] {song.get('title')} - {song.get('artist')}\n"
+                f"难度: {lv}\n(图片渲染失败已回退: {type(e).__name__}: {e})"
+            )
+
+    @filter.command("歌曲")
+    async def song_detail(self, event: AstrMessageEvent, song_id: str = ""):
+        """/歌曲 <编号> 查看歌曲详情卡"""
+        song_id = (song_id or "").strip()
+        if not song_id.isdigit():
+            yield event.plain_result("用法：/歌曲 <曲目编号>，编号可先用 /查歌 查到")
+            return
+        try:
+            client = self._client()
+            song_data = await asyncio.to_thread(client.get_song_list)
+        except LXNSError as e:
+            yield event.plain_result(f"🐷 曲库查询失败：{e}")
+            return
+        songs_by_id = {s.get("id"): s for s in song_data.get("songs", [])}
+        song = songs_by_id.get(int(song_id))
+        if not song:
+            yield event.plain_result(f"曲库里没有编号 {song_id} 的曲子")
+            return
+        async for r in self._song_card(event, song, song_data):
+            yield r
