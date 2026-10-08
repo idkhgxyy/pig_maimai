@@ -84,7 +84,8 @@ class LxnsClient:
     def get_song_list(self, force: bool = False) -> dict:
         now = time.time()
         if self._song_cache is None or force or now - self._song_cache_time > 86400:
-            self._song_cache = self._get("/song/list")
+            # notes=true：携带各谱面物量数据（详情卡需要）
+            self._song_cache = self._get("/song/list?notes=true")
             self._song_cache_time = now
         return self._song_cache
 
