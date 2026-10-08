@@ -12,6 +12,8 @@ import asyncio
 import glob
 import json
 import os
+import random
+import re
 import sys
 from pathlib import Path
 
@@ -26,6 +28,15 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 难度序号 → 简称（level_index: 0=Basic 1=Advanced 2=Expert 3=Master 4=Re:Master）
 DIFF_NAMES = ["BAS", "ADV", "EXP", "MAS", "ReM"]
+
+# /来首 谱面难度缩写 → level_index
+DIFF_ABBR = {
+    "bas": 0, "basic": 0,
+    "adv": 1, "advanced": 1,
+    "exp": 2, "expert": 2,
+    "mas": 3, "master": 3,
+    "rem": 4, "remaster": 4, "re:master": 4,
+}
 
 # 段位编号 → 名称（maimai DX 段位认定，落雪 course_rank 字段）
 COURSE_NAMES = {
@@ -82,7 +93,7 @@ def _fmt_b50_summary(bests: dict) -> str:
     )
 
 
-@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌", "0.1.0")
+@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲", "0.4.0")
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -237,6 +248,60 @@ class PigMaimaiPlugin(Star):
                 f"[{song.get('id')}] {song.get('title')} - {song.get('artist')}\n"
                 f"难度: {lv}\n(图片渲染失败已回退: {type(e).__name__}: {e})"
             )
+
+    @filter.command("来首")
+    async def random_song(self, event: AstrMessageEvent, spec: str = ""):
+        """/来首 [谱面][难度] 随机抽一首歌，如 /来首、/来首 13+、/来首 mas13"""
+        spec = (spec or "").strip().lower()
+        want_idx, want_lv = None, None
+        if spec:
+            m = re.fullmatch(r"(bas|adv|exp|mas|rem|basic|advanced|expert|master|remaster)?(\d{1,2}\+?)?", spec)
+            if not m or (not m.group(1) and not m.group(2)):
+                yield event.plain_result(
+                    "用法：/来首 [谱面][难度]\n"
+                    "例如：/来首（全随机）、/来首 13、/来首 13+、/来首 mas13、/来首 exp14"
+                )
+                return
+            if m.group(1):
+                want_idx = DIFF_ABBR[m.group(1)]
+            if m.group(2):
+                want_lv = m.group(2)
+
+        try:
+            song_data = await asyncio.to_thread(self._client().get_song_list)
+        except LXNSError as e:
+            yield event.plain_result(f"🐷 曲库查询失败：{e}")
+            return
+
+        # 收集所有符合条件谱面（standard/dx 各 5 个难度，逐一过筛）
+        candidates = []
+        for s in song_data.get("songs", []):
+            diffs = s.get("difficulties", {})
+            for type_key, type_name in (("standard", "标准"), ("dx", "DX")):
+                for idx, chart in enumerate(diffs.get(type_key) or []):
+                    if want_idx is not None and idx != want_idx:
+                        continue
+                    if want_lv and chart.get("level") != want_lv:
+                        continue
+                    candidates.append((s, type_key, type_name, idx, chart))
+
+        if not candidates:
+            yield event.plain_result(
+                f"曲库里没有符合「{spec}」的谱面（难度写 7~15，谱面可加 bas/adv/exp/mas/rem）"
+            )
+            return
+
+        song, type_key, type_name, idx, chart = random.choice(candidates)
+        lv_value = chart.get("level_value")
+        lv_text = f"{DIFF_NAMES[idx]} {chart.get('level', '?')}"
+        if lv_value:
+            lv_text += f"（定数 {lv_value:.1f}）"
+        yield event.plain_result(
+            "🎲 抽中了！\n"
+            f"[{song.get('id')}] {song.get('title')} - {song.get('artist', '?')}\n"
+            f"谱面: {type_name} / {lv_text}\n"
+            f"用 /歌曲 {song.get('id')} 看详情卡"
+        )
 
     @filter.command("歌曲")
     async def song_detail(self, event: AstrMessageEvent, song_id: str = ""):
