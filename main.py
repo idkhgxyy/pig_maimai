@@ -86,7 +86,9 @@ def _fmt_b50_summary(bests: dict) -> str:
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        self.client = LxnsClient(token=_load_token())
+        self.client = LxnsClient(
+            token=_load_token(), cache_dir=os.path.dirname(os.path.abspath(__file__))
+        )
         self.token_empty = not self.client.token
         print(f"=== pig_maimai 已加载，令牌{'已配置' if not self.token_empty else '未配置'} ===", flush=True)
 
@@ -143,22 +145,47 @@ class PigMaimaiPlugin(Star):
 
     @filter.command("查歌")
     async def search_song(self, event: AstrMessageEvent, keyword: str = ""):
-        """/查歌 <关键词> 按曲名搜索曲库（无需令牌）"""
+        """/查歌 <关键词> 按官方曲名或别名搜索曲库（别名无需令牌）"""
         keyword = (keyword or "").strip()
         if not keyword:
-            yield event.plain_result("用法：/查歌 <曲名关键词>，例如 /查歌 狂乱")
+            yield event.plain_result("用法：/查歌 <曲名或别名>，例如 /查歌 狂乱 或 /查歌 水鱼")
             return
         try:
-            song_data = await asyncio.to_thread(self._client().get_song_list)
-            songs = song_data.get("songs", [])
+            client = self._client()
+            song_data = await asyncio.to_thread(client.get_song_list)
+            alias_list = await asyncio.to_thread(client.get_alias_list)
         except LXNSError as e:
             yield event.plain_result(f"🐷 曲库查询失败：{e}")
             return
+
+        songs = song_data.get("songs", [])
         kw = keyword.lower()
-        hits = [s for s in songs if kw in s.get("title", "").lower()][:8]
+
+        # 1. 官方曲名子串匹配
+        hits = [s for s in songs if kw in s.get("title", "").lower()]
+
+        # 2. 别名匹配（精确优先，其次包含），命中的别名用于展示
+        alias_map = {a["song_id"]: a.get("aliases", []) for a in alias_list}
+        alias_hits = {}  # song_id -> 命中的别名
+        exact = [sid for sid, aliases in alias_map.items() if keyword in aliases]
+        fuzzy = [
+            sid
+            for sid, aliases in alias_map.items()
+            if sid not in exact and any(kw in al.lower() for al in aliases)
+        ]
+        songs_by_id = {s.get("id"): s for s in songs}
+        for sid in exact + fuzzy:
+            if sid in songs_by_id and sid not in {s.get("id") for s in hits}:
+                alias_hits[sid] = next(al for al in alias_map[sid] if keyword in al)
+                hits.append(songs_by_id[sid])
+
+        hits = hits[:8]
         if not hits:
-            yield event.plain_result(f"没找到带「{keyword}」的曲子（曲库缓存每天更新一次）")
+            yield event.plain_result(
+                f"没找到带「{keyword}」的曲子（支持官方曲名与别名，曲库缓存每天更新）"
+            )
             return
+
         lines = []
         for s in hits:
             diffs = s.get("difficulties", {})
@@ -168,5 +195,9 @@ class PigMaimaiPlugin(Star):
                 if arr:
                     last = arr[-1].get("level", "?")
                     lv.append(f"{tag}{last}")
-            lines.append(f"  [{s.get('id')}] {s.get('title')} - {s.get('artist', '?')} ({'/'.join(lv)})")
+            via = f"（别名「{alias_hits[s['id']]}」）" if s.get("id") in alias_hits else ""
+            lines.append(
+                f"  [{s.get('id')}] {s.get('title')} - {s.get('artist', '?')} "
+                f"({'/'.join(lv)}){via}"
+            )
         yield event.plain_result("🎼 查到这些：\n" + "\n".join(lines))

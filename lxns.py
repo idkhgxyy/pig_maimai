@@ -2,15 +2,20 @@
 
 API 文档: https://maimai.lxns.net/docs/api/maimai
 鉴权方式: 请求头直接携带 Authorization: <developer_token>（注意不是 Bearer 格式）
-限流说明: 官方未公布配额，触发限流返回 429；曲库等资源接口要求勿频繁请求，
-         故本客户端对曲库做了 24 小时内存缓存。
+限流说明: 官方未公布配额，触发限流返回 429；曲库/别名等资源接口要求勿频繁请求，
+         故本客户端做了缓存：曲库 24h 内存缓存，别名落盘缓存 7 天，
+         拉取失败时回退使用旧缓存文件，将对官方服务的请求压到最低。
 """
 
+import json
 import time
+from pathlib import Path
 
 import requests
 
 BASE_URL = "https://maimai.lxns.net/api/v0/maimai"
+
+ALIAS_REFRESH_SECONDS = 7 * 86400  # 别名库落盘缓存有效期：7 天
 
 
 class LXNSError(Exception):
@@ -18,11 +23,12 @@ class LXNSError(Exception):
 
 
 class LxnsClient:
-    def __init__(self, token: str = "", timeout: int = 15):
+    def __init__(self, token: str = "", timeout: int = 15, cache_dir: str = None):
         self.token = (token or "").strip()
         self.timeout = timeout
         self._song_cache = None
         self._song_cache_time = 0.0
+        self.cache_dir = Path(cache_dir) if cache_dir else None
 
     def _headers(self) -> dict:
         headers = {"Accept": "application/json"}
@@ -81,3 +87,48 @@ class LxnsClient:
             self._song_cache = self._get("/song/list")
             self._song_cache_time = now
         return self._song_cache
+
+    # ---------- 曲名别名（公开接口，落盘缓存 7 天，失败回退旧文件） ----------
+
+    def get_alias_list(self, force: bool = False) -> list:
+        """获取全量曲名别名列表：[{"song_id": int, "aliases": [str, ...]}, ...]
+
+        缓存策略（对官方服务零压力）：
+        1. 优先读本地缓存文件（7 天内有效）
+        2. 过期/强制时才发一次网络请求，成功则覆盖缓存文件
+        3. 网络失败时回退使用过期缓存（并向上标注数据可能过时）
+        """
+        cache_file = self.cache_dir / "alias_cache.json" if self.cache_dir else None
+
+        def _read_file():
+            if cache_file and cache_file.exists():
+                try:
+                    wrapper = json.loads(cache_file.read_text(encoding="utf-8"))
+                    return wrapper.get("fetched_at", 0), wrapper.get("aliases", [])
+                except Exception:
+                    return 0, []
+            return 0, []
+
+        fetched_at, cached = _read_file()
+        fresh = time.time() - fetched_at < ALIAS_REFRESH_SECONDS
+        if cached and fresh and not force:
+            return cached
+
+        try:
+            data = self._get("/alias/list")
+            aliases = data.get("aliases", []) if isinstance(data, dict) else data
+            if not aliases:
+                raise LXNSError("别名接口返回空数据")
+            if cache_file:
+                cache_file.write_text(
+                    json.dumps(
+                        {"fetched_at": time.time(), "aliases": aliases},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            return aliases
+        except Exception:
+            if cached:
+                return cached  # 回退旧数据（可能过时）
+            raise
