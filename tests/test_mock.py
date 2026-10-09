@@ -24,7 +24,10 @@ sys.path.insert(0, str(STUB_DIR))  # 必须在 import main 之前，抢在真框
 sys.path.insert(0, str(REPO_ROOT))
 
 import main as plugin_main  # noqa: E402
+import ra as ra_calc  # noqa: E402
 from lxns import LxnsClient  # noqa: E402
+
+BESTS_FIXTURE = Path(__file__).resolve().parent / ".bests_fixture.json"
 
 
 class MockEvent:
@@ -58,6 +61,12 @@ def make_plugin() -> plugin_main.PigMaimaiPlugin:
     plugin = plugin_main.PigMaimaiPlugin.__new__(plugin_main.PigMaimaiPlugin)
     plugin.client = LxnsClient(token="", cache_dir=str(REPO_ROOT))
     plugin.token_empty = True
+
+    def fake_load_token():
+        return "MOCK_TOKEN"  # 测试里假装令牌已配置，绕过门槛
+
+    plugin_main._load_token = fake_load_token
+    plugin.token_empty = False
 
     # 曲库落盘缓存：24h 内重复跑测试不发任何 API 请求
     def cached_song_list(force: bool = False) -> dict:
@@ -163,12 +172,83 @@ async def test_song_detail(plugin):
     check("无效编号给提示", "没有编号" in texts(res), texts(res))
 
 
+def load_bests():
+    if not BESTS_FIXTURE.exists():
+        return None
+    return json.loads(BESTS_FIXTURE.read_text(encoding="utf-8"))
+
+
+async def test_ra_formula(plugin, bests):
+    print("\n[ra] 单曲 RA 公式（真实成绩校验）")
+    check("有测试数据", bests is not None, "缺 tests/.bests_fixture.json，跳过校验")
+    if bests is None:
+        return
+
+    songs = plugin.client.get_song_list()["songs"]
+    by_id = {s["id"]: s for s in songs}
+    n_ok, n_bad = 0, []
+    for arr in (bests.get("standard") or []) + (bests.get("dx") or []):
+        song = by_id.get(arr["id"])
+        if not song:
+            continue
+        charts = (song.get("difficulties") or {}).get(arr["type"]) or []
+        li = arr["level_index"]
+        if li >= len(charts):
+            continue
+        lv = charts[li].get("level_value")
+        if not lv:
+            continue
+        calc = ra_calc.single_ra(lv, arr["achievements"])
+        if abs(calc - arr["dx_rating"]) < 1e-3:
+            n_ok += 1
+        else:
+            n_bad.append(f"{arr['song_name']}: 算出{calc:.4f} vs 官方{arr['dx_rating']}")
+    check(f"RA 公式 {n_ok}/50 全对", not n_bad, "; ".join(n_bad[:5]))
+
+    # 已知锚点：满档 13.9 → 312.9168（来自真实成绩）
+    check("满档锚点 13.9→312.92", abs(ra_calc.max_ra(13.9) - 312.9168) < 1e-3,
+          str(ra_calc.max_ra(13.9)))
+    check("next_band 定位 SSS+ 线", ra_calc.next_band(100.2) == (100.5, 22.4))
+
+
+async def test_eat_rating(plugin, bests):
+    print("\n[/吃分] B50 挖潜")
+    check("有测试数据", bests is not None, "缺 tests/.bests_fixture.json，跳过")
+    if bests is None:
+        return
+
+    # 用假好友码验证隐私红线：绝不能出现在输出里
+    plugin.client.get_player_by_qq = lambda qq: {"name": "测试猪", "friend_code": "FAKE_CODE_9527"}
+    plugin.client.get_bests = lambda fc: bests
+
+    ev = MockEvent()
+    res = await collect(plugin.eat_rating(ev, ""))
+    t = texts(res)
+    check("输出涨分安排", "涨分安排" in t, t)
+    check("有推荐列表", "→ 满档可得" in t, t)
+    check("有总潜力", "全部吃满" in t, t)
+    check("无好友码泄漏", "FAKE_CODE_9527" not in t and "好友码" not in t)
+
+    # 极端情况：全部满档（达成率与官方 RA 都改成满档值）→ 无肉可吃
+    maxed = {"standard": [], "dx": []}
+    for key in ("standard", "dx"):
+        for sc in bests.get(key) or []:
+            maxed[key].append({**sc, "achievements": 101.0, "dx_rating": 99999})
+    plugin.client.get_bests = lambda fc: maxed
+    ev = MockEvent()
+    res = await collect(plugin.eat_rating(ev, ""))
+    check("全满档给提示", "无分可安排" in texts(res), texts(res))
+
+
 async def main():
     print("=== pig_maimai mock 测试 ===")
     plugin = make_plugin()
+    bests = load_bests()
     await test_random_song(plugin)
     await test_search_song(plugin)
     await test_song_detail(plugin)
+    await test_ra_formula(plugin, bests)
+    await test_eat_rating(plugin, bests)
 
     print(f"\n结果: {len(PASS)} 通过, {len(FAIL)} 失败")
     if FAIL:

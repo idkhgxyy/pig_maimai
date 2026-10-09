@@ -13,3 +13,4 @@ __pycache__/
 # 本地测试环境与缓存
 .venv/
 tests/.song_cache.json
+tests/.bests_fixture.json

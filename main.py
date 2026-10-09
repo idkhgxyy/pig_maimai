@@ -22,6 +22,7 @@ from astrbot.api.star import Context, Star, register
 
 # 保证能 import 同目录下的 lxns.py / render.py（不依赖插件系统的模块命名方式）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ra as ra_calc  # noqa: E402
 from lxns import LXNSError, LxnsClient  # noqa: E402
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -93,7 +94,7 @@ def _fmt_b50_summary(bests: dict) -> str:
     )
 
 
-@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲", "0.4.0")
+@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分推荐", "0.5.0")
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -302,6 +303,62 @@ class PigMaimaiPlugin(Star):
             f"谱面: {type_name} / {lv_text}\n"
             f"用 /歌曲 {song.get('id')} 看详情卡"
         )
+
+    @filter.command("吃分")
+    async def eat_rating(self, event: AstrMessageEvent, qq: str = ""):
+        """/吃分 [QQ号] B50 挖潜：推荐当前版本涨分最快的谱"""
+        qq = self._resolve_qq(event, qq)
+        if self.token_empty and not _load_token():
+            yield event.plain_result("开发者令牌还没配置，等猪主人填好就能查啦")
+            return
+        try:
+            client = self._client()
+            player = await asyncio.to_thread(client.get_player_by_qq, qq)
+            friend_code = str(player.get("friend_code", ""))
+            bests = await asyncio.to_thread(client.get_bests, friend_code)
+            song_data = await asyncio.to_thread(client.get_song_list)
+        except LXNSError as e:
+            yield event.plain_result(f"🐷 查分失败：{e}")
+            return
+
+        songs_by_id = {s.get("id"): s for s in song_data.get("songs", [])}
+        rows = []
+        for sc in (bests.get("standard") or []) + (bests.get("dx") or []):
+            song = songs_by_id.get(sc.get("id"))
+            if not song:
+                continue
+            charts = (song.get("difficulties") or {}).get(sc.get("type")) or []
+            li = sc.get("level_index", 0)
+            if li >= len(charts) or not charts[li].get("level_value"):
+                continue
+            lv = charts[li]["level_value"]
+            ach = sc.get("achievements", 0)
+            cur_ra = sc.get("dx_rating") or 0
+            gap = ra_calc.max_ra(lv) - cur_ra
+            if gap <= 0.05:  # 已满档/误差抹平
+                continue
+            rows.append(
+                (gap, sc.get("song_name", "?"), DIFF_NAMES[li], lv, ach, cur_ra)
+            )
+
+        if not rows:
+            yield event.plain_result(
+                f"{player.get('name', '你')} 的 B50 已经全是满档，本猪无分可安排——去开新谱吧"
+            )
+            return
+
+        rows.sort(key=lambda r: -r[0])
+        top = rows[:8]
+        total = sum(r[0] for r in rows)
+        lines = ["🐷 涨分安排（B50 内挖潜，目标 SSS+ 100.5%）"]
+        for i, (gap, name, diff, lv, ach, cur) in enumerate(top, 1):
+            lines.append(
+                f"{i}. {name} {diff} 定数{lv}\n"
+                f"   当前 {ach:.4f}%（{cur:.1f} RA）→ 满档可得 "
+                f"{ra_calc.max_ra(lv):.1f}，+{gap:.1f}"
+            )
+        lines.append(f"\n全部吃满预计 +{total:.1f} RA（共 {len(rows)} 首有肉）")
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("歌曲")
     async def song_detail(self, event: AstrMessageEvent, song_id: str = ""):
