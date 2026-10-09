@@ -79,6 +79,13 @@ class LxnsClient:
         """按好友码查询 B50 成绩（标准 B30 + DX B15）。"""
         return self._get(f"/player/{friend_code}/bests")
 
+    def get_scores(self, friend_code: str) -> list:
+        """全谱面最佳成绩（简化版：rate 是评级字符串如 'sssp'，无数值达成率）。"""
+        data = self._get(f"/player/{friend_code}/scores")
+        if isinstance(data, dict) and "scores" in data:
+            return data["scores"]
+        return data or []
+
     # ---------- 曲库（公开接口，带 24h 缓存） ----------
 
     def get_song_list(self, force: bool = False) -> dict:

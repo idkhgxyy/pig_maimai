@@ -94,7 +94,7 @@ def _fmt_b50_summary(bests: dict) -> str:
     )
 
 
-@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分推荐", "0.5.0")
+@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分推荐", "0.6.0")
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -306,7 +306,7 @@ class PigMaimaiPlugin(Star):
 
     @filter.command("吃分")
     async def eat_rating(self, event: AstrMessageEvent, qq: str = ""):
-        """/吃分 [QQ号] B50 挖潜：推荐当前版本涨分最快的谱"""
+        """/吃分 [QQ号] 涨分安排：回头补 + 榜外捡漏 + 开新谱"""
         qq = self._resolve_qq(event, qq)
         if self.token_empty and not _load_token():
             yield event.plain_result("开发者令牌还没配置，等猪主人填好就能查啦")
@@ -317,47 +317,159 @@ class PigMaimaiPlugin(Star):
             friend_code = str(player.get("friend_code", ""))
             bests = await asyncio.to_thread(client.get_bests, friend_code)
             song_data = await asyncio.to_thread(client.get_song_list)
+            try:
+                scores = await asyncio.to_thread(client.get_scores, friend_code)
+                score_err = ""
+            except LXNSError as e:
+                scores = None
+                score_err = str(e)
         except LXNSError as e:
             yield event.plain_result(f"🐷 查分失败：{e}")
             return
 
         songs_by_id = {s.get("id"): s for s in song_data.get("songs", [])}
+        cur_version_base = max(
+            (s.get("version") or 0) // 1000 * 1000 for s in songs_by_id.values()
+        )
+        b35_bottom = min(
+            (sc.get("dx_rating") or 9e9) for sc in bests.get("standard") or []
+        ) if bests.get("standard") else 0.0
+        b15_bottom = min(
+            (sc.get("dx_rating") or 9e9) for sc in bests.get("dx") or []
+        ) if bests.get("dx") else 0.0
+
+        def chart_lv(song: dict, type_key: str, li: int):
+            charts = (song.get("difficulties") or {}).get(type_key) or []
+            if li >= len(charts):
+                return None
+            return charts[li].get("level_value")
+
+        def bottom_for(song: dict) -> float:
+            """这首歌要挤进哪个榜：当前版本曲进 B15，旧版本曲进 B35。"""
+            return b15_bottom if (song.get("version") or 0) >= cur_version_base else b35_bottom
+
+        b50_keys = {
+            (sc.get("id"), sc.get("type"), sc.get("level_index"))
+            for key in ("standard", "dx")
+            for sc in bests.get(key) or []
+        }
+
+        # ---- 第一段：回头补（B50 榜内冲满档） ----
         rows = []
         for sc in (bests.get("standard") or []) + (bests.get("dx") or []):
             song = songs_by_id.get(sc.get("id"))
             if not song:
                 continue
-            charts = (song.get("difficulties") or {}).get(sc.get("type")) or []
-            li = sc.get("level_index", 0)
-            if li >= len(charts) or not charts[li].get("level_value"):
+            lv = chart_lv(song, sc.get("type"), sc.get("level_index", 0))
+            if not lv:
                 continue
-            lv = charts[li]["level_value"]
-            ach = sc.get("achievements", 0)
             cur_ra = sc.get("dx_rating") or 0
             gap = ra_calc.max_ra(lv) - cur_ra
-            if gap <= 0.05:  # 已满档/误差抹平
+            if gap <= 0.05:
                 continue
-            rows.append(
-                (gap, sc.get("song_name", "?"), DIFF_NAMES[li], lv, ach, cur_ra)
-            )
+            rows.append((gap, sc.get("song_name", "?"), DIFF_NAMES[sc.get("level_index", 0)], lv, sc.get("achievements", 0), cur_ra))
+        rows.sort(key=lambda r: -r[0])
 
-        if not rows:
+        lines = ["🐷 涨分安排（目标：挤进并站稳 B50）"]
+        if rows:
+            lines.append("")
+            lines.append("【回头补】榜内冲满档：")
+            for i, (gap, name, diff, lv, ach, cur) in enumerate(rows[:5], 1):
+                lines.append(
+                    f"{i}. {name} {diff} 定数{lv}\n"
+                    f"   当前 {ach:.4f}%（{cur:.1f}）→ 满档 {ra_calc.max_ra(lv):.1f}，+{gap:.1f}"
+                )
+
+        # ---- 第二段：榜外捡漏（打过但没进榜） ----
+        if scores is not None:
+            played = {}
+            for sc in scores:
+                played[(sc.get("id"), sc.get("type"), sc.get("level_index"))] = sc
+
+            outside = []
+            for key, sc in played.items():
+                if key in b50_keys:
+                    continue
+                song = songs_by_id.get(key[0])
+                if not song:
+                    continue
+                lv = chart_lv(song, key[1], key[2] or 0)
+                if not lv:
+                    continue
+                mx = ra_calc.max_ra(lv)
+                bottom = bottom_for(song)
+                if mx <= bottom + 0.05:
+                    continue  # 满档也进不了榜
+                lb = ra_calc.ra_from_rank(lv, sc.get("rate", ""))
+                if mx - lb <= 0.5:
+                    continue  # 已经满档附近
+                outside.append(
+                    (mx - lb, sc.get("song_name", "?"), DIFF_NAMES[key[2] or 0], lv, sc.get("rate", ""), mx - bottom)
+                )
+            outside.sort(key=lambda r: -r[0])
+            if outside:
+                lines.append("")
+                lines.append("【榜外捡漏】打过但有肉：")
+                for i, (pot, name, diff, lv, rate, over) in enumerate(outside[:5], 1):
+                    lines.append(
+                        f"{i}. {name} {diff} 定数{lv} 现评级{rate.upper()}\n"
+                        f"   满档 {ra_calc.max_ra(lv):.1f}，超榜底 +{over:.1f}"
+                    )
+
+            # ---- 第三段：开新谱（没打过的谱，按同定数战绩排把握） ----
+            from collections import defaultdict
+
+            hist = defaultdict(lambda: [0, 0])  # lv -> [SSS+数, 总数]
+            for key, sc in played.items():
+                song = songs_by_id.get(key[0])
+                if not song:
+                    continue
+                lv = chart_lv(song, key[1], key[2] or 0)
+                if not lv:
+                    continue
+                hist[lv][1] += 1
+                if sc.get("rate") == "sssp":
+                    hist[lv][0] += 1
+
+            fresh = []
+            for song in songs_by_id.values():
+                bottom = bottom_for(song)
+                for type_key in ("standard", "dx"):
+                    diffs = (song.get("difficulties") or {}).get(type_key) or []
+                    for li, chart in enumerate(diffs):
+                        lv = chart.get("level_value")
+                        if not lv:
+                            continue
+                        if (song.get("id"), type_key, li) in played:
+                            continue
+                        mx = ra_calc.max_ra(lv)
+                        if mx <= bottom + 0.05:
+                            continue
+                        near = [v for k, v in hist.items() if abs(k - lv) <= 0.4]
+                        sssp_n = sum(x[0] for x in near)
+                        total_n = sum(x[1] for x in near)
+                        fresh.append(
+                            (-sssp_n / total_n if total_n else 0, -mx, song, type_key, li, lv, sssp_n, total_n, mx - bottom)
+                        )
+            fresh.sort(key=lambda r: (r[0], r[1], r[2].get("title") or ""))
+            if fresh:
+                lines.append("")
+                lines.append("【开新谱】没碰过但你有把握：")
+                for i, (_, _, song, type_key, li, lv, sssp_n, total_n, over) in enumerate(fresh[:5], 1):
+                    grasp = f"邻近战绩 SSS+ {sssp_n}/{total_n}" if total_n else "无同档战绩"
+                    lines.append(
+                        f"{i}. [{song.get('id')}] {song.get('title')} {DIFF_NAMES[li]} 定数{lv}\n"
+                        f"   满档 {ra_calc.max_ra(lv):.1f}，超榜底 +{over:.1f}（{grasp}）"
+                    )
+        if scores is None and score_err:
+            lines.append("")
+            lines.append(f"（榜外/新谱部分跳过：{score_err}）")
+
+        if len(lines) == 1:
             yield event.plain_result(
                 f"{player.get('name', '你')} 的 B50 已经全是满档，本猪无分可安排——去开新谱吧"
             )
             return
-
-        rows.sort(key=lambda r: -r[0])
-        top = rows[:8]
-        total = sum(r[0] for r in rows)
-        lines = ["🐷 涨分安排（B50 内挖潜，目标 SSS+ 100.5%）"]
-        for i, (gap, name, diff, lv, ach, cur) in enumerate(top, 1):
-            lines.append(
-                f"{i}. {name} {diff} 定数{lv}\n"
-                f"   当前 {ach:.4f}%（{cur:.1f} RA）→ 满档可得 "
-                f"{ra_calc.max_ra(lv):.1f}，+{gap:.1f}"
-            )
-        lines.append(f"\n全部吃满预计 +{total:.1f} RA（共 {len(rows)} 首有肉）")
         yield event.plain_result("\n".join(lines))
 
     @filter.command("歌曲")

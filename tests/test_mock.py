@@ -28,6 +28,7 @@ import ra as ra_calc  # noqa: E402
 from lxns import LxnsClient  # noqa: E402
 
 BESTS_FIXTURE = Path(__file__).resolve().parent / ".bests_fixture.json"
+SCORES_FIXTURE = Path(__file__).resolve().parent / ".scores_fixture.json"
 
 
 class MockEvent:
@@ -212,21 +213,28 @@ async def test_ra_formula(plugin, bests):
 
 
 async def test_eat_rating(plugin, bests):
-    print("\n[/吃分] B50 挖潜")
+    print("\n[/吃分] 涨分安排三段式")
     check("有测试数据", bests is not None, "缺 tests/.bests_fixture.json，跳过")
     if bests is None:
         return
 
+    scores = None
+    if SCORES_FIXTURE.exists():
+        scores = json.loads(SCORES_FIXTURE.read_text(encoding="utf-8"))
+
     # 用假好友码验证隐私红线：绝不能出现在输出里
     plugin.client.get_player_by_qq = lambda qq: {"name": "测试猪", "friend_code": "FAKE_CODE_9527"}
     plugin.client.get_bests = lambda fc: bests
+    plugin.client.get_scores = lambda fc: scores or []
 
     ev = MockEvent()
     res = await collect(plugin.eat_rating(ev, ""))
     t = texts(res)
     check("输出涨分安排", "涨分安排" in t, t)
-    check("有推荐列表", "→ 满档可得" in t, t)
-    check("有总潜力", "全部吃满" in t, t)
+    check("回头补段落", "回头补" in t, t)
+    if scores:
+        check("榜外捡漏段落", "榜外捡漏" in t, t)
+        check("开新谱段落", "开新谱" in t, t)
     check("无好友码泄漏", "FAKE_CODE_9527" not in t and "好友码" not in t)
 
     # 极端情况：全部满档（达成率与官方 RA 都改成满档值）→ 无肉可吃
@@ -235,6 +243,7 @@ async def test_eat_rating(plugin, bests):
         for sc in bests.get(key) or []:
             maxed[key].append({**sc, "achievements": 101.0, "dx_rating": 99999})
     plugin.client.get_bests = lambda fc: maxed
+    plugin.client.get_scores = lambda fc: []
     ev = MockEvent()
     res = await collect(plugin.eat_rating(ev, ""))
     check("全满档给提示", "无分可安排" in texts(res), texts(res))

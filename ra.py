@@ -56,3 +56,29 @@ def next_band(achievements: float):
         if achievements < floor:
             return floor, c
     return None
+
+
+# 评级字符串（落雪 /scores 的 rate 字段）→ 达成率下限。
+# 高档位（sssp~aaa）按官方评级线，低档位为近似值，仅用于估计"保底 RA"。
+RANK_FLOORS = {
+    "sssp": 100.5,
+    "sss": 100.0,
+    "ssp": 99.99,
+    "ss": 99.5,
+    "sp": 99.0,
+    "s": 98.0,
+    "aaa": 97.0,
+    "aa": 94.0,
+    "a": 90.0,
+    "bbb": 87.0,
+    "bb": 82.0,
+    "b": 77.0,
+    "c": 72.0,
+    "d": 0.0,
+}
+
+
+def ra_from_rank(constant: float, rank: str) -> float:
+    """按评级字符串估计 RA 下限（拿不到数值达成率时的替代品）。"""
+    floor = RANK_FLOORS.get((rank or "").lower(), 0.0)
+    return single_ra(constant, floor)
