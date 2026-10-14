@@ -42,7 +42,7 @@ DIFF_ABBR = {
     "rem": 4, "remaster": 4, "re:master": 4,
 }
 
-# /猪签：运势 → 推荐谱面定数段（运越好谱越硬）
+# /猪签：运势五档（暂不与其他系统联动，纯乐子）
 LUCKS = [
     ("大吉", 13.0, 13.9),
     ("吉", 12.3, 13.0),
@@ -133,7 +133,7 @@ def _fmt_b50_summary(bests: dict) -> str:
     )
 
 
-@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分/猪签", "0.7.0")
+@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分/猪签/推歌", "0.8.0")
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -263,44 +263,49 @@ class PigMaimaiPlugin(Star):
 
     @filter.command("猪签", alias={"运势"})
     async def fortune(self, event: AstrMessageEvent):
-        """/猪签 每日一签：运势 + 解签 + 今日推荐曲目（带封面）"""
+        """/猪签 每日一签：运势 + 解签（同一人同一天固定）"""
         sender = str(event.get_sender_id())
         today = time.strftime("%Y%m%d")
         rng = random.Random(hashlib.sha256(f"pigsign:{sender}:{today}".encode()).hexdigest())
 
-        luck, lv_lo, lv_hi = rng.choice(LUCKS)
+        luck, _lv_lo, _lv_hi = rng.choice(LUCKS)
         sign_text = rng.choice(SIGN_TEXTS)
+        yield event.plain_result(f"🔮 今日猪签 · {luck}\n「{sign_text}」")
 
-        # 今日推荐曲目：从曲库缓存抽一张定数落在运势段内的谱面
-        song_line, jacket = None, None
+    @filter.command("推歌")
+    async def recommend_song(self, event: AstrMessageEvent):
+        """/推歌 今日推荐曲目（同一人同一天固定，带封面）"""
+        sender = str(event.get_sender_id())
+        today = time.strftime("%Y%m%d")
+        rng = random.Random(hashlib.sha256(f"pigsong:{sender}:{today}".encode()).hexdigest())
+
         try:
             song_data = await asyncio.to_thread(self._client().get_song_list)
-            candidates = []
-            for s in song_data.get("songs", []):
-                for type_key, type_name in (("standard", "标准"), ("dx", "DX")):
-                    for idx, chart in enumerate(s.get("difficulties", {}).get(type_key) or []):
-                        lv = chart.get("level_value")
-                        if lv and lv_lo <= lv <= lv_hi:
-                            candidates.append((s, type_name, idx, lv))
-            if candidates:
-                s, type_name, idx, lv = rng.choice(candidates)
-                title = s.get("title", "???")
-                artist = s.get("artist", "?")
-                song_line = (
-                    f"🎵 今日修行：[{s.get('id')}] {title} - {artist}\n"
-                    f"谱面: {type_name} / {DIFF_NAMES[idx]} {chart.get('level')}（定数 {lv:.1f}）"
-                )
-                jacket = f"https://assets.lxns.net/maimai/jacket/{s.get('id')}.png"
-        except Exception:
-            pass  # 曲库抽风不影响抽签本体
+        except LXNSError as e:
+            yield event.plain_result(f"🐷 曲库查询失败：{e}")
+            return
 
-        lines = [f"🔮 今日猪签 · {luck}", f"「{sign_text}」"]
-        if song_line:
-            lines += ["", song_line, "（打不打随意，反正运势已经写好了）"]
-        chain = [Plain("\n".join(lines))]
-        if jacket:
-            chain.append(Image.fromURL(jacket))
-        yield event.chain_result(chain)
+        candidates = []
+        for s in song_data.get("songs", []):
+            for type_key, type_name in (("standard", "标准"), ("dx", "DX")):
+                for idx, chart in enumerate(s.get("difficulties", {}).get(type_key) or []):
+                    lv = chart.get("level_value")
+                    if lv:
+                        # 连谱面标签一起存，避免循环变量残留
+                        candidates.append((s, type_name, idx, lv, chart.get("level", "?")))
+        if not candidates:
+            yield event.plain_result("曲库是空的，推不了歌")
+            return
+
+        s, type_name, idx, lv, lv_label = rng.choice(candidates)
+        yield event.chain_result([
+            Plain(
+                f"🎵 今日推荐：[{s.get('id')}] {s.get('title')} - {s.get('artist', '?')}\n"
+                f"谱面: {type_name} / {DIFF_NAMES[idx]} {lv_label}（定数 {lv:.1f}）\n"
+                f"详情用 /歌曲 {s.get('id')}"
+            ),
+            Image.fromURL(f"https://assets.lxns.net/maimai/jacket/{s.get('id')}.png"),
+        ])
 
     async def _song_card(self, event: AstrMessageEvent, song: dict, song_data: dict):
         """渲染并发送歌曲详情卡。"""

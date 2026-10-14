@@ -258,52 +258,65 @@ async def test_eat_rating(plugin, bests):
 
 
 async def test_fortune(plugin):
-    print("\n[/猪签] 每日运势")
+    print("\n[/猪签] 每日运势（纯签，无曲目）")
     ev = MockEvent(sender_id="1760468630")
     res1 = await collect(plugin.fortune(ev))
     t1 = texts(res1)
     check("有运势等级", any(l in t1 for l, _, _ in __import__("main").LUCKS), t1)
     check("有解签", "「" in t1, t1)
-
-    luck_line = t1.splitlines()[0]
-    lv_lo, lv_hi = next((lo, hi) for l, lo, hi in __import__("main").LUCKS if l in luck_line)
-
-    def lv_in_band(results):
-        for kind, payload in results:
-            if kind == "chain":
-                for comp in payload:
-                    txt = getattr(comp, "text", None) or str(comp)
-                    m = re.search(r"定数 (\d+\.\d)", str(txt))
-                    if m:
-                        return lv_lo <= float(m.group(1)) <= lv_hi
-        return False
-
-    check("运势等级联动定数段", lv_in_band(res1), t1)
+    check("不再夹带曲目", "谱面" not in t1, t1)
 
     # 确定性：同一人同一天两次抽签结果一致
     res2 = await collect(plugin.fortune(MockEvent(sender_id="1760468630")))
     check("同日同人同签", texts(res1) == texts(res2))
 
-    # 有图：链里有 Image 组件且 URL 指向曲绘 CDN
+
+async def test_recommend_song(plugin):
+    print("\n[/推歌] 今日推荐曲目")
+    ev = MockEvent(sender_id="1760468630")
+    res1 = await collect(plugin.recommend_song(ev))
+    t1 = texts(res1)
+    check("有推荐曲目", "今日推荐" in t1, t1)
+
+    songs = {s["id"]: s for s in plugin.client.get_song_list()["songs"]}
+
+    def parse(results):
+        """从 chain 里提取 (song_id, type, diff_name, 展示标签, 展示定数)。"""
+        for kind, payload in results:
+            if kind != "chain":
+                continue
+            txt = "\n".join(str(getattr(c, "text", "") or "") for c in payload)
+            m = re.search(r"\[(\d+)\].*?(标准|DX) / (\S+) (\S+)（定数 (\d+\.\d)）", txt, re.S)
+            if m:
+                return m.groups()
+        return None
+
+    g = parse(res1)
+    check("输出可解析", g is not None, t1)
+    if g:
+        sid, type_name, diff_name, lv_label, lv_shown = g
+        type_key = "standard" if type_name == "标准" else "dx"
+        li = {"BAS": 0, "ADV": 1, "EXP": 2, "MAS": 3, "ReM": 4}[diff_name]
+        chart = songs[int(sid)]["difficulties"][type_key][li]
+        check(
+            f"难度标签与定数一致（{type_name}/{diff_name} {lv_label} = {lv_shown}）",
+            chart["level"] == lv_label
+            and abs(chart["level_value"] - float(lv_shown)) < 1e-6,
+            f"实际: {chart['level']} / {chart['level_value']}",
+        )
+
+    # 确定性
+    res2 = await collect(plugin.recommend_song(MockEvent(sender_id="1760468630")))
+    check("同日同人同曲", texts(res1) == texts(res2))
+
+    # 带封面
     has_jacket = any(
-        "jacket" in str(getattr(comp, "url", ""))
-        for kind, payload in res1 if kind == "chain"
-        for comp in payload
+        "jacket" in str(getattr(c, "url", ""))
+        for kind, payload in res1 if kind == "chain" for c in payload
     )
     check("带曲绘封面", has_jacket, t1)
 
-    # 曲库故障降级：只有签没有歌
-    orig = plugin.client.get_song_list
 
-    def boom(force=False):
-        raise RuntimeError("api down")
-
-    plugin.client.get_song_list = boom
-    res3 = await collect(plugin.fortune(MockEvent(sender_id="1760468630")))
-    check("曲库故障不炸签", "今日猪签" in texts(res3), texts(res3))
-    plugin.client.get_song_list = orig
-
-    print(f"\n[test_fortune] {len(PASS)} 通过, {len(FAIL)} 失败（累计）")
 
 
 async def main():
@@ -316,6 +329,7 @@ async def main():
     await test_ra_formula(plugin, bests)
     await test_eat_rating(plugin, bests)
     await test_fortune(plugin)
+    await test_recommend_song(plugin)
 
     print(f"\n结果: {len(PASS)} 通过, {len(FAIL)} 失败")
     if FAIL:
