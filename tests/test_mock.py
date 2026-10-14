@@ -34,9 +34,14 @@ SCORES_FIXTURE = Path(__file__).resolve().parent / ".scores_fixture.json"
 class MockEvent:
     """模拟 AstrMessageEvent：只实现插件用到的接口，结果记进 self.results。"""
 
-    def __init__(self, sender_id: str = "1760468630"):
+    def __init__(self, sender_id: str = "1760468630", woken: bool = True):
         self.sender_id = sender_id
         self.results = []
+        self.is_at_or_wake_command = woken
+        self.stopped = False
+
+    def stop_event(self):
+        self.stopped = True
 
     def get_sender_id(self) -> str:
         return self.sender_id
@@ -151,6 +156,27 @@ async def test_random_song(plugin):
     ev = MockEvent()
     res = await collect(plugin.random_song(ev, "哈哈"))
     check("非法参数给用法", "用法" in texts(res), texts(res))
+
+    # 无空格写法「来首13」走正则通道
+    print("\n[/来首] 无空格兼容（正则通道）")
+    ev = MockEvent()  # 已 @ 唤醒
+    ev._s = "来首13"
+    ev.get_message_str = lambda: "来首13"
+    res = await collect(plugin.random_song_nospace(ev))
+    m = LEVEL_RE.search(texts(res))
+    check("来首13 能抽到 13 级", bool(m) and m.group(3) == "13", texts(res))
+
+    ev = MockEvent()  # 已 @ 唤醒
+    ev.get_message_str = lambda: "来首mas13"
+    res = await collect(plugin.random_song_nospace(ev))
+    m = LEVEL_RE.search(texts(res))
+    check("来首mas13 能指定谱面", bool(m) and m.group(2) == "MAS", texts(res))
+
+    # 未唤醒（没 @ 没 /）→ 静默装死
+    ev = MockEvent(woken=False)
+    ev.get_message_str = lambda: "来首13"
+    res = await collect(plugin.random_song_nospace(ev))
+    check("未唤醒时装死", ev.stopped and not res)
 
     # 不存在的谱面 → 空结果提示
     ev = MockEvent()

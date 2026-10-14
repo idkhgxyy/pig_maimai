@@ -133,7 +133,7 @@ def _fmt_b50_summary(bests: dict) -> str:
     )
 
 
-@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分/猪签/推歌", "0.8.0")
+@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分/猪签/推歌", "0.8.1")
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -338,6 +338,24 @@ class PigMaimaiPlugin(Star):
     @filter.command("来首")
     async def random_song(self, event: AstrMessageEvent, spec: str = ""):
         """/来首 [谱面][难度] 随机抽一首歌，如 /来首、/来首 13+、/来首 mas13"""
+        async for r in self._random_song_impl(event, spec):
+            yield r
+
+    # 兼容「来首13」这种不带空格的写法（命令通道要求指令与参数间有空格）
+    # 正则只在「来首」后紧跟难度写法时才命中， bare「来首」仍走命令通道，不会双触发
+    @filter.regex(r"^来首(?:bas|adv|exp|mas|rem)?\d{1,2}\+?$")
+    async def random_song_nospace(self, event: AstrMessageEvent):
+        """来首13（无空格写法）兼容入口"""
+        if not event.is_at_or_wake_command:
+            # 正则通道自己能唤醒 bot，但静默猪哲学：没 @ 也没 / 就装死
+            event.stop_event()
+            return
+        spec = event.get_message_str().strip()[len("来首"):].lower()
+        async for r in self._random_song_impl(event, spec):
+            yield r
+
+    async def _random_song_impl(self, event: AstrMessageEvent, spec: str):
+        """随机抽歌核心逻辑，命令与正则两个入口共用。"""
         spec = (spec or "").strip().lower()
         want_idx, want_lv = None, None
         if spec:

@@ -23,6 +23,13 @@ class _Filter:
         return deco
 
     @staticmethod
+    def regex(pattern, **kwargs):
+        def deco(func):
+            return func
+
+        return deco
+
+    @staticmethod
     def event_message_type(*args, **kwargs):
         def deco(func):
             return func
