@@ -10,14 +10,17 @@ v0.1.0 功能：
 
 import asyncio
 import glob
+import hashlib
 import json
 import os
 import random
 import re
 import sys
+import time
 from pathlib import Path
 
 from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, register
 
 # 保证能 import 同目录下的 lxns.py / render.py（不依赖插件系统的模块命名方式）
@@ -38,6 +41,42 @@ DIFF_ABBR = {
     "mas": 3, "master": 3,
     "rem": 4, "remaster": 4, "re:master": 4,
 }
+
+# /猪签：运势 → 推荐谱面定数段（运越好谱越硬）
+LUCKS = [
+    ("大吉", 13.0, 13.9),
+    ("吉", 12.3, 13.0),
+    ("中吉", 11.6, 12.3),
+    ("末吉", 11.0, 11.6),
+    ("大凶", 9.0, 11.0),
+]
+
+SIGN_TEXTS = [
+    "今日宜瘫着，忌回消息。",
+    "今天的手元格外听话，适合冲一把一直不敢碰的谱。",
+    "宜喝奶茶，忌喝半糖——要喝就喝全糖，猪生苦短。",
+    "今天错滑键会特别多，不是你的问题，是地板的问题。",
+    "宜在别人失败时发出猪叫，忌自己失败时被听见猪叫。",
+    "今日警戒值高，看到粉色的东西绕着走。",
+    "今天适合装死，装得越像运气越好。",
+    "宜早起，但仅限于说完这句话继续睡。",
+    "今天的你跟谱面定数之间存在一点误会，建议互相理解。",
+    "宜吃，忌想吃不吃的后果。",
+    "今天唯一的风险是队友太菜，好在通常你自己就是那个队友。",
+    "宜复盘，忌记仇。",
+    "今天会有好事发生，具体是什么由你打完这一把决定。",
+    "忌冲动消费，除非是游戏机厅的币。",
+    "今天你的反应速度+10%，代价是晚上少睡的那一小时。",
+    "宜憋大招，忌憋话——想说什么就说，反正猪也不懂。",
+    "今天的运气都在存钱罐里，取出来就没了，看着就好。",
+    "宜单推，忌劈腿——说的是推谱，别想歪。",
+    "今天适合把上一把的失利归咎于天气。",
+    "宜坐牢（机厅那种），忌加班（公司那种）。",
+    "今天别人夸你的时候要谦虚，别人损你的时候要当没听见。",
+    "宜背谱，忌背锅。",
+    "今天你的&键（就是那个键）会格外顺手。",
+    "忌连打，宜连休。",
+]
 
 # 段位编号 → 名称（maimai DX 段位认定，落雪 course_rank 字段）
 COURSE_NAMES = {
@@ -94,7 +133,7 @@ def _fmt_b50_summary(bests: dict) -> str:
     )
 
 
-@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分推荐", "0.6.0")
+@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分/猪签", "0.7.0")
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -221,6 +260,47 @@ class PigMaimaiPlugin(Star):
         yield event.plain_result(
             "🎼 查到这些（/歌曲 <编号> 看详情）：\n" + "\n".join(lines)
         )
+
+    @filter.command("猪签", alias={"运势"})
+    async def fortune(self, event: AstrMessageEvent):
+        """/猪签 每日一签：运势 + 解签 + 今日推荐曲目（带封面）"""
+        sender = str(event.get_sender_id())
+        today = time.strftime("%Y%m%d")
+        rng = random.Random(hashlib.sha256(f"pigsign:{sender}:{today}".encode()).hexdigest())
+
+        luck, lv_lo, lv_hi = rng.choice(LUCKS)
+        sign_text = rng.choice(SIGN_TEXTS)
+
+        # 今日推荐曲目：从曲库缓存抽一张定数落在运势段内的谱面
+        song_line, jacket = None, None
+        try:
+            song_data = await asyncio.to_thread(self._client().get_song_list)
+            candidates = []
+            for s in song_data.get("songs", []):
+                for type_key, type_name in (("standard", "标准"), ("dx", "DX")):
+                    for idx, chart in enumerate(s.get("difficulties", {}).get(type_key) or []):
+                        lv = chart.get("level_value")
+                        if lv and lv_lo <= lv <= lv_hi:
+                            candidates.append((s, type_name, idx, lv))
+            if candidates:
+                s, type_name, idx, lv = rng.choice(candidates)
+                title = s.get("title", "???")
+                artist = s.get("artist", "?")
+                song_line = (
+                    f"🎵 今日修行：[{s.get('id')}] {title} - {artist}\n"
+                    f"谱面: {type_name} / {DIFF_NAMES[idx]} {chart.get('level')}（定数 {lv:.1f}）"
+                )
+                jacket = f"https://assets.lxns.net/maimai/jacket/{s.get('id')}.png"
+        except Exception:
+            pass  # 曲库抽风不影响抽签本体
+
+        lines = [f"🔮 今日猪签 · {luck}", f"「{sign_text}」"]
+        if song_line:
+            lines += ["", song_line, "（打不打随意，反正运势已经写好了）"]
+        chain = [Plain("\n".join(lines))]
+        if jacket:
+            chain.append(Image.fromURL(jacket))
+        yield event.chain_result(chain)
 
     async def _song_card(self, event: AstrMessageEvent, song: dict, song_data: dict):
         """渲染并发送歌曲详情卡。"""

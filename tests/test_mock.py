@@ -101,10 +101,18 @@ def check(name: str, cond: bool, detail: str = ""):
 
 
 def texts(results: list) -> str:
-    """把结果列表里的纯文本拼起来（图片结果记为 [图片]）。"""
+    """把结果列表里的文本拼起来（chain 取各组件文本/URL，其余记为 [类型]）。"""
     parts = []
     for kind, payload in results:
-        parts.append(payload if kind == "plain" else f"[{kind}]")
+        if kind == "plain":
+            parts.append(payload)
+        elif kind == "chain":
+            for comp in payload:
+                parts.append(
+                    str(getattr(comp, "text", None) or getattr(comp, "url", "") or comp)
+                )
+        else:
+            parts.append(f"[{kind}]")
     return "\n".join(parts)
 
 
@@ -249,6 +257,55 @@ async def test_eat_rating(plugin, bests):
     check("全满档给提示", "无分可安排" in texts(res), texts(res))
 
 
+async def test_fortune(plugin):
+    print("\n[/猪签] 每日运势")
+    ev = MockEvent(sender_id="1760468630")
+    res1 = await collect(plugin.fortune(ev))
+    t1 = texts(res1)
+    check("有运势等级", any(l in t1 for l, _, _ in __import__("main").LUCKS), t1)
+    check("有解签", "「" in t1, t1)
+
+    luck_line = t1.splitlines()[0]
+    lv_lo, lv_hi = next((lo, hi) for l, lo, hi in __import__("main").LUCKS if l in luck_line)
+
+    def lv_in_band(results):
+        for kind, payload in results:
+            if kind == "chain":
+                for comp in payload:
+                    txt = getattr(comp, "text", None) or str(comp)
+                    m = re.search(r"定数 (\d+\.\d)", str(txt))
+                    if m:
+                        return lv_lo <= float(m.group(1)) <= lv_hi
+        return False
+
+    check("运势等级联动定数段", lv_in_band(res1), t1)
+
+    # 确定性：同一人同一天两次抽签结果一致
+    res2 = await collect(plugin.fortune(MockEvent(sender_id="1760468630")))
+    check("同日同人同签", texts(res1) == texts(res2))
+
+    # 有图：链里有 Image 组件且 URL 指向曲绘 CDN
+    has_jacket = any(
+        "jacket" in str(getattr(comp, "url", ""))
+        for kind, payload in res1 if kind == "chain"
+        for comp in payload
+    )
+    check("带曲绘封面", has_jacket, t1)
+
+    # 曲库故障降级：只有签没有歌
+    orig = plugin.client.get_song_list
+
+    def boom(force=False):
+        raise RuntimeError("api down")
+
+    plugin.client.get_song_list = boom
+    res3 = await collect(plugin.fortune(MockEvent(sender_id="1760468630")))
+    check("曲库故障不炸签", "今日猪签" in texts(res3), texts(res3))
+    plugin.client.get_song_list = orig
+
+    print(f"\n[test_fortune] {len(PASS)} 通过, {len(FAIL)} 失败（累计）")
+
+
 async def main():
     print("=== pig_maimai mock 测试 ===")
     plugin = make_plugin()
@@ -258,6 +315,7 @@ async def main():
     await test_song_detail(plugin)
     await test_ra_formula(plugin, bests)
     await test_eat_rating(plugin, bests)
+    await test_fortune(plugin)
 
     print(f"\n结果: {len(PASS)} 通过, {len(FAIL)} 失败")
     if FAIL:
