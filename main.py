@@ -133,7 +133,7 @@ def _fmt_b50_summary(bests: dict) -> str:
     )
 
 
-@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分/猪签/推歌", "0.8.1")
+@register("pig_maimai", "gxyy", "猪bot查分：落雪API舞萌DX查分/B50/查歌/随机选曲/吃分/猪签/推歌", "0.9.0")
 class PigMaimaiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -177,6 +177,7 @@ class PigMaimaiPlugin(Star):
             player = await asyncio.to_thread(client.get_player_by_qq, qq)
             friend_code = str(player.get("friend_code", ""))
             bests = await asyncio.to_thread(client.get_bests, friend_code)
+            song_data = await asyncio.to_thread(client.get_song_list)
         except LXNSError as e:
             yield event.plain_result(f"🐷 查分失败：{e}")
             return
@@ -187,7 +188,7 @@ class PigMaimaiPlugin(Star):
         try:
             import render as b50render  # noqa: PLC0415
 
-            await b50render.render_b50_png_async(player, bests, out)
+            await b50render.render_b50_png_async(player, bests, out, song_data=song_data)
             yield event.image_result(str(out))
         except Exception as e:  # 渲染兜底：回退文本版
             yield event.plain_result(
